@@ -1,0 +1,310 @@
+---
+title: "Transit Time Summaries"
+author: "UF FirstHealth Team"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, eval=T, warning = F, comment = "")
+```
+
+\pagebreak
+<html>
+<img src="https://www.firsthealth.org/images/logo.png" alt="FirstHealth Project Report">
+</html>
+
+# Installation
+Step 1 : Install Packages
+```{r eval=T, include=F}
+#install.packages(c("tidyverse", "lubridate"))
+#install.packages("kableExtra")
+# install_load<- function(p){
+#   n_p <- p[!(p %in% installed.packages()[, "Package"])]
+#   if (length(n_p)) install.packages(n_p, dependencies = TRUE)
+#   sapply(p, require, character.only = TRUE)
+# }
+# pkg <- c("tidyverse","kableExtra","lubridate")
+#install_load(pkg)
+install.packages("kableExtra")
+library(kableExtra)
+library(tidyverse)
+library(lubridate)
+#library(rjson, lib.loc = "/Users/michaelsumner/Documents/QMB6944 - Practicum #3/SchedulingToolandFiles/R_file_and_Data_0411/Packages/rjson")
+```
+
+
+Step 2: Define path to folder containing assignment sheet files
+```{r eval=T}
+
+path1="C:\\Users\\user\\Desktop\\project\\Schedules_Cleaned\\SchedulingToolandFiles\\newdata"
+assignmentSheetsRaw <- list.files(path = path1)
+```
+
+
+Step 3: Define function that combines the assignment sheets into one large sheet, removes unnecessary columns, and specifies the year for each date.
+
+-note to first Health this can be changed.
+```{r eval=T}
+intro_date=function(i){
+  df=read.csv(paste0(path1, "/", assignmentSheetsRaw[i])) %>%
+    subset(select = -c(4,5))
+  md=gsub("(.*?)_.*", "\\1", assignmentSheetsRaw[i])
+  ifelse(nchar(gsub("-.*", "", md))>1, paste0(md, "-2021"), paste0(md, "-2022")) ->df$date
+  return(df)
+}
+```
+
+
+Step 4: Create null list of nested dataframes for each date
+## Create null list and replace with df
+```{r eval=T}
+step1=vector("list", length=length(assignmentSheetsRaw)) # create null list
+for(i in 1:length(assignmentSheetsRaw)){                 # replace null with df
+  step1[[i]]=intro_date(i)
+}
+```
+
+
+Export the list of dataframes to display as one dataframe called step2. Add a column containing the date from the CSV the rows came from.
+## Combine list to dataframe and add date
+```{r eval=T}
+step2<-step1 %>%                                         # combine list to df
+  do.call("rbind", .)
+step2$date=lubridate::mdy(step2$date)                    # parse date
+```
+
+
+##Separate Hospital Geography from Bed Number and add to a new column from PT_DEPT_BED column. Retain PT_DEPT_BED column.
+```{r eval=T}
+step2$geography=gsub("(.*?) / .*", "\\1", step2$PT_DEPT_BED)
+step2$geography <- gsub("^.{0,3}", "", step2$geography)
+step2$room_numb=gsub("(.*?) / (.*)", "\\2", step2$PT_DEPT_BED)
+step2$CONSULTING_HOSPITALIST[is.na(step2$CONSULTING_HOSPITALIST)] <- " "
+```
+
+
+##Sum time function is defined. 4 extra minutes are added to all provider transit time cases where the geography and level/floor of the hospital changed. 2 extra minutes are added to all provider transit time cases where just the level/floor changed.
+```{r load_function}
+sum_time=function(ck2){
+  if(nrow(ck2)==1){
+    tot_time=0
+  } else {
+    tot_time=0
+    for(i in 1:(nrow(ck2)-1)){
+      trans_time=trytime[ck2$Mapping[i],ck2$Mapping[i+1]]+
+        case_when(
+          (ck2$Mapping[i]!=ck2$Mapping[i+1]) & (ck2$LVL[i]!=ck2$LVL[i+1]) ~ 3, 
+          (ck2$Mapping[i]!=ck2$Mapping[i+1]) & (ck2$LVL[i]==ck2$LVL[i+1]) ~ 2,
+          TRUE ~ 0
+        )
+      tot_time=tot_time+trans_time 
+    }
+  }
+  return(tot_time)
+}
+```
+
+
+##The step2 dataframe containing all rows form the CSVs that were added to the "newdata" folder is now updated to be called "ck." "Trymap" which is located in the folder package contains all of the geographies as they are named in the schedule CSV fed into the "newdata" folder by FirstHealth. The CSV "Trymap" comes from is called mapping_mostrecentdate. There is a "Mapping column" that states the name of the physical hospital geography where the hospital geography from the schedule CSVs is actually located, if they are not alread the same. There is also a zone column which is used for sorting purposes. We will discuss the zone column in a moment. 
+
+##"Trytime" is a CSV called "SUM_TravelTime_date" which is a 20x20 matrix of each possible geography-to-geography transit that could occur. There are 26 unique geographies stated in the schedule CSVs, however there are 20 geographies total that contain the other 6. This one of the purposes of the trymap dataframe created from the "mapping_date" CSV.
+
+##The bed and room number columns are also cleaned up in this step
+```{r}
+ck = step2
+trymap = read.csv("mapping_0404.csv")
+trytime = read.csv("travel_time_0408.csv")
+row.names(trytime)<-trytime$X
+trytime=trytime[,-1]
+  
+row.names(trytime)<-gsub("^X", "", row.names(trytime))
+trytime[is.na(trytime)]<-0
+colnames(trytime)=gsub("^X", "", colnames(trytime)) %>%
+  gsub("\\.", " ", .)
+
+ck %>%
+  mutate(
+    PT_DEPT_BED=gsub("^MRH", "", PT_DEPT_BED) %>%
+      trimws(), 
+    geo=gsub("(.*)/.*", "\\1", PT_DEPT_BED) %>%
+      trimws(),
+    beds=gsub(".*/(.*)", "\\1", PT_DEPT_BED) %>%
+      trimws(),
+  )  %>%
+  left_join(trymap, by=c("geo"="GEOGRAPHY")) -> try1
+```
+
+
+##As stated previously, the purspose of the zone column in "trymap" will be explained. Because the order of rooms providers visit each day is unkown, an estimate is achieved by sorting the dataframe first by date, then by provider, and then by zone name (alphabetically as of 04/07/2022). Sorting the rows this way allows the transit time estimates to be conservative, assuming that doctors will tend to move between rooms within the same geography before moving to rooms in another geography. Calculations are not made for rows bording each other that have different dates. The sum time output for doctors (immediately below, try 3) and PA's (up next) is organized by doctor and contains only 3 rows: Doctor name (sorted by), date, and total time spent in transit
+```{r}
+try1 %>%
+  filter(!ATTENDING %in% c(" ","")) %>%
+  group_by(ATTENDING, date) %>%
+  arrange(Zone) %>% 
+  do(dr_sum_time=sum_time(.)) -> try3
+unlist(try3$dr_sum_time) -> try3$dr_sum_time
+```
+
+
+Creating daily summary. There are 2 columns: date & daily_sum
+```{r}
+try3 %>%
+  group_by(date) %>%
+  summarize(daily_sum=sum(dr_sum_time)) %>%
+  mutate(date=lubridate::ymd(date))->try4
+```
+
+
+"Total Transit Time" line chart represents the total time spent (y-axis) in transit for all doctors daily.
+The days included are based on the daily schedule/intranet list CSVs added to the "newdata" folder.
+
+The x-axis labels for time summarize the daily schedule/intranet list CSVs added to the "newdata" folder by month.
+
+Each movement for each doctor, represented by 2 sequential rows containing that doctor's name on the same date pulled from the original daily schedules, has a transit time determined via a lookup table, "travel_time_0408.csv."
+```{r}
+try4 %>%
+  ggplot(aes(x=date, y=daily_sum))+
+  geom_line()+
+  labs(title="Total Transit Time - Doctors",x="Month", y="Total Time (minutes)" )
+```
+
+
+The "Transit Time by Doctor" figure sums all of the geography-to-geography movements (in minutes) of each doctor for all schedule CSV's dropped into the newdata folder. <br>
+```{r}
+try3 %>%
+  group_by(ATTENDING) %>%
+  summarize(dr_sum_time = sum(dr_sum_time)) %>%
+  arrange(desc(dr_sum_time))%>%
+  head(10) %>%
+  ggplot(aes(x=reorder(ATTENDING,+dr_sum_time), y=dr_sum_time ))+
+  geom_bar(stat="identity")+
+  labs(title="Transit Time by Doctor",y="Time (in minutes)", x="Provider" )+
+  coord_flip()
+```
+
+
+The "Transit Time by Day - Doctor" figure sums all geography-to-geography movements (in minutes) and groups them by day of the week. 
+```{r}
+# Sys.setlocale("LC_TIME","english")
+try3 %>% 
+  mutate(day=weekdays(lubridate::ymd(date))) %>%
+  group_by(day) %>%
+  summarize(dr_sum_time= sum(dr_sum_time)) %>%
+  arrange(desc(dr_sum_time)) %>%
+  head(10) %>%
+  ggplot(aes(x=ordered(day,level=weekdays(ISOdate(1,1,7:1))), y=dr_sum_time ))+
+  geom_bar(stat="identity")+
+  labs(title="Transit Time by Day - Doctors",y="Time (in minutes)", x="Day" )+
+  coord_flip()
+```
+
+
+Need dataframe for each month? other suggestions?
+```{r}
+#print("The total number of minutes spent in transit for the assignment sheets entered is"
+#$113 and $51
+113*sum(try3$dr_sum_time)/60
+```
+
+
+##This is the same as the code chunk above, but for the PAs.
+```{r}
+try1 %>%
+  filter(!CONSULTING_HOSPITALIST %in% c(" ","")) %>% 
+  group_by(CONSULTING_HOSPITALIST, date) %>%
+  arrange(Zone) %>% 
+  do(pa_sum_time=sum_time(.)) -> try3pa
+unlist(try3pa$pa_sum_time) -> try3pa$pa_sum_time
+```
+
+
+Creating daily summary. There are 2 columns: date & daily_sum
+```{r}
+try3pa %>%
+  group_by(date) %>%
+  summarize(daily_sum=sum(pa_sum_time)) %>%
+  mutate(date=lubridate::ymd(date))->try4pa
+```
+
+
+"Total Transit Time" line chart represents the total time spent (y-axis) in transit for all PAs daily.
+The days included are based on the daily schedule/intranet list CSVs added to the "newdata" folder.
+
+The x-axis labels for time summarize the daily schedule/intranet list CSVs added to the "newdata" folder by month.
+
+Each movement for each PA, represented by 2 sequential rows containing that PAs name on the same date pulled from the original daily schedules, has a transit time determined via a lookup table, "travel_time_0408.csv."
+```{r}
+try4pa %>%
+  ggplot(aes(x=date, y=daily_sum))+
+  geom_line()+
+  labs(title="Total Transit Time - PAs",x="Month", y="Total Time (minutes)" )
+```
+
+
+The "Transit Time by PA" figure sums all of the geography-to-geography movements (in minutes) of each PA for all schedule CSV's dropped into the newdata folder. <br>
+```{r}
+try3pa %>%
+  group_by(CONSULTING_HOSPITALIST) %>%
+  summarize(pa_sum_time = sum(pa_sum_time)) %>%
+  arrange(desc(pa_sum_time))%>%
+  head(10) %>%
+  ggplot(aes(x=reorder(CONSULTING_HOSPITALIST,+pa_sum_time), y=pa_sum_time ))+
+  geom_bar(stat="identity")+
+  labs(title="Transit Time by PA",y="Time (in minutes)", x="Provider" )+
+  coord_flip()
+```
+
+
+The "Transit Time by Day - PA" figure sums all geography-to-geography movements (in minutes) and groups them by day of the week. 
+```{r}
+# Sys.setlocale("LC_TIME","english")
+try3pa %>% 
+  mutate(day=weekdays(lubridate::ymd(date))) %>%
+  group_by(day) %>%
+  summarize(pa_sum_time= sum(pa_sum_time)) %>%
+  arrange(desc(pa_sum_time)) %>%
+  head(10) %>%
+  ggplot(aes(x=ordered(day,level=weekdays(ISOdate(1,1,7:1))), y=pa_sum_time ))+
+  geom_bar(stat="identity")+
+  labs(title="Transit Time by Day - PAs",y="Time (in minutes)", x="Day" )+
+  coord_flip()
+```
+
+
+<!-- #Extra, may not be needed -->
+<!-- ```{r echo=F,eval=F} -->
+<!-- write.csv(try1,"AllSchedulesAndAddedData.csv") -->
+<!-- ``` -->
+
+<!-- Doctor data export for tableau -->
+<!-- ```{r echo=F,eval=F} -->
+<!-- write.csv(try3,"SUM_TravelTimeDR_0412.csv") -->
+<!-- ``` -->
+
+<!-- PA data export for tableau -->
+<!-- ```{r echo=F,eval=F} -->
+<!-- write.csv(try3pa,"SUM_TravelTimePA_0412.csv") -->
+<!-- ``` -->
+
+<!-- Test intermediate step for doc averages -->
+<!-- ```{r} -->
+<!-- try3 %>% -->
+<!--   group_by(ATTENDING) %>% -->
+<!--   summarize(total_sum=sum(dr_sum_time)) ->tryByDoc -->
+
+<!-- drOCC = try3 %>% count(ATTENDING) -->
+
+<!-- drAVG <- merge(x=drOCC, y=tryByDoc, by="ATTENDING", all.x=TRUE) -->
+<!-- drAVG$AVG <- with(drAVG, round(total_sum/n)) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- trytime %>% -->
+<!--   kbl() -->
+
+<!-- #check https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html to build a better table -->
+
+<!-- ``` -->
